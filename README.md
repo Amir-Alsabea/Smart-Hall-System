@@ -1,5 +1,4 @@
 <div align="center">
-
 # 🏫 Smart Hall
 ### AI-Powered Classroom Monitoring System
 
