@@ -3,7 +3,7 @@
 # 🧠 Neurolytics
 ### The Next-Gen Smart Classroom: Quality Education Powered by AI
 
-**Neurolytics** is an AI-powered classroom monitoring system that tracks student attention in real-time by combining IoT sensors (temperature, humidity, light, motion, sound) with Computer Vision. It classifies the learning environment, detects student distractions, and delivers live analytics to educators through a web-based Command Center dashboard.
+**Neurolytics** is an AI-powered classroom monitoring system that tracks student attention in real-time by combining IoT sensors (temperature, humidity, light, motion, sound) with Computer Vision. It classifies the learning environment, detects student distractions, automates attendance, and delivers live analytics to educators through a web-based Command Center dashboard.
 
 ---
 
@@ -20,6 +20,18 @@
 
 ---
 
+## 📸 Project Showcase
+
+<div align="center">
+
+![Neurolytics Project Showcase](./assets/neurolytics_showcase.jpeg)
+
+*Left: Hardware prototype with ESP32-S3, sensors, and live Command Center dashboard · Top right: Project poster · Bottom right: AI-powered camera on tripod in the classroom*
+
+</div>
+
+---
+
 ## 📖 Table of Contents
 
 1. [System Architecture](#1-system-architecture)
@@ -28,10 +40,11 @@
 4. [Project File Structure](#4-project-file-structure)
 5. [Step-by-Step: Installation & Running](#5-step-by-step-installation--running)
 6. [Dashboard Guide](#6-dashboard-guide)
-7. [Machine Learning Model](#7-machine-learning-model)
-8. [Computer Vision Module](#8-computer-vision-module)
-9. [Troubleshooting](#9-troubleshooting)
-10. [Quick-Start Checklist](#10-quick-start-checklist)
+7. [Attendance Monitor](#7-attendance-monitor)
+8. [Machine Learning Model](#8-machine-learning-model)
+9. [Computer Vision Module](#9-computer-vision-module)
+10. [Troubleshooting](#10-troubleshooting)
+11. [Quick-Start Checklist](#11-quick-start-checklist)
 
 ---
 
@@ -44,6 +57,7 @@ The project is structured into three independent layers that communicate at runt
 | **Hardware** | ESP32-S3 + sensors | Reads physical environment, streams JSON over USB serial |
 | **ML Backend** | `Neurolytics-ML.py` | Classifies environment, logs data, hosts `/api/state` on `:5050` |
 | **CV Backend** | `CV_Focus_Monitor.py` | Detects student focus via webcam, also hosts `/api/state` on `:5050` |
+| **Attendance** | `Attendance_Monitor.py` | Face-recognition-based auto attendance, hosts `/api/attendance` on `:5050` |
 | **Dashboard** | `index.html` | Browser-based live Command Center, polls API, renders charts and alerts |
 
 > ⚠️ **Important:** The ML module and the CV module are **INDEPENDENT**. Run **only one** at a time. Both serve the same API endpoint (`:5050/api/state`). The web dashboard works with whichever backend is currently active.
@@ -59,7 +73,7 @@ The project is structured into three independent layers that communicate at runt
 | **PIR Motion Sensor** | Digital (pin 21) | Detects physical presence / motion in the room |
 | **Light Sensor** | LDR Analog (pin 10) | Measures ambient light level (ADC 0–4095) |
 | **Microphone / Sound** | Analog mic (pin 12) | Samples noise level 10× per reading, returns average ADC value |
-| **Laptop / PC Camera** | Built-in or USB webcam | Used exclusively by the CV module for face and gaze tracking |
+| **Laptop / PC Camera** | Built-in or USB webcam | Used by CV module for face/gaze tracking and by Attendance module for recognition |
 
 ---
 
@@ -86,10 +100,16 @@ pip install flask flask-cors numpy scikit-learn joblib pyserial
 pip install opencv-python mediapipe ultralytics pandas
 ```
 
+**Attendance module only (additional):**
+```bash
+pip install face-recognition opencv-python pandas openpyxl
+```
+
 **Or install everything at once:**
 ```bash
 pip install flask flask-cors numpy scikit-learn joblib pyserial
 pip install opencv-python mediapipe ultralytics pandas
+pip install face-recognition openpyxl
 ```
 
 ### 3.3 Arduino Board Setup
@@ -113,13 +133,20 @@ Before uploading the firmware, configure Arduino IDE for the ESP32-S3:
 Neurolytics/
 ├── Neurolytics-ML.py          ←  ML Environmental Monitor
 ├── CV_Focus_Monitor.py        ←  Computer Vision Student Monitor
+├── Attendance_Monitor.py      ←  Face-Recognition Attendance System
 ├── ESP32_Firmware.ino         ←  Arduino sketch for ESP32-S3
 ├── index.html                 ←  Web Dashboard (open in browser)
 ├── face_landmarker.task       ←  MediaPipe model file (CV module)
 ├── yolov8n.pt                 ←  YOLOv8 model file (CV module)
+├── student_faces/             ←  Registered student face images (Attendance module)
+│   ├── StudentName_ID.jpg
+│   └── ...
+├── assets/
+│   └── neurolytics_showcase.jpeg
 └── neurolytics_data/          ←  Auto-created: CSV logs + ML model
     ├── env_model.pkl              ←  Trained RandomForest classifier
-    ├── env_YYYYMMDD_HHMMSS.csv    ←  Session data log
+    ├── attendance_YYYYMMDD.csv    ←  Daily attendance log
+    ├── env_YYYYMMDD_HHMMSS.csv    ←  Session sensor data log
     └── env_YYYYMMDD_summary.json  ←  Session summary
 ```
 
@@ -194,9 +221,24 @@ python Neurolytics-ML.py --no-arduino
 
 ---
 
+### Step 2C — Run the Attendance Monitor
+
+*Use this module to automatically register student attendance via face recognition.*
+
+1. Add student face images to the `student_faces/` folder (filename format: `StudentName_ID.jpg`)
+2. Run the script:
+   ```bash
+   python Attendance_Monitor.py
+   ```
+3. The system scans the webcam feed, matches detected faces against registered students, and marks them present
+4. Attendance is logged to `neurolytics_data/attendance_YYYYMMDD.csv` automatically
+5. Press `ESC` or `Q` to end the session and export the final report
+
+---
+
 ### Step 3 — Open the Web Dashboard
 
-1. Make sure either the ML or CV Python module is running (API active on port 5050)
+1. Make sure either the ML, CV, or Attendance Python module is running (API active on port 5050)
 2. Open `index.html` in your browser (double-click or drag into Chrome/Edge)
 3. The green banner confirms: *"Connected to Neurolytics API — live sensor data active"*
 4. The dashboard auto-refreshes every 800 ms — no additional server required
@@ -214,6 +256,7 @@ python Neurolytics-ML.py --no-arduino
 | **Focus Rate Chart** | Sparkline of the last 60-second focus rate trend |
 | **IoT Sensor Cards** | Live values for Temperature, Humidity, Light, Noise, and Motion. Red warning badge when out of range. |
 | **Student Monitor** | Per-student attention diagnostics with distraction type labels |
+| **Attendance Register** | Live list of present students with timestamps, linked to the Attendance Monitor module |
 | **Alert Log** | Scrollable list of the last 60 alerts — yellow for IoT threshold breaches, red for classification alerts |
 
 ### Environment Thresholds
@@ -228,7 +271,47 @@ python Neurolytics-ML.py --no-arduino
 
 ---
 
-## 7. Machine Learning Model
+## 7. Attendance Monitor
+
+The Attendance Monitor uses **face recognition** to automatically identify and log students as they enter the classroom — no manual roll call needed.
+
+### 7.1 How It Works
+
+| Step | Description |
+|------|-------------|
+| **1. Enrollment** | Add a labeled photo of each student to `student_faces/` (format: `Name_ID.jpg`) |
+| **2. Recognition** | On each frame, the system detects faces and compares encodings against the enrolled database |
+| **3. Logging** | First confirmed match per session is recorded as present with a timestamp |
+| **4. Export** | Session ends with a CSV report in `neurolytics_data/` and a summary shown in the dashboard |
+
+### 7.2 Attendance Log Format
+
+```csv
+student_id, name, timestamp, status
+2021001, Ahmed Al-Rashid, 2026-06-19 08:03:12, Present
+2021002, Sara Al-Ghamdi,  2026-06-19 08:04:45, Present
+2021003, Mohammed Saleh,  —,                   Absent
+```
+
+### 7.3 Configuration
+
+| Parameter | Default | Description |
+|-----------|:-------:|-------------|
+| `TOLERANCE` | `0.5` | Face match sensitivity — lower = stricter |
+| `MIN_FRAMES` | `5` | Consecutive matching frames before marking present |
+| `CAMERA_INDEX` | `0` | Webcam index (`0` = default, `1` = secondary) |
+| `FACES_DIR` | `student_faces/` | Path to enrolled student face images |
+| `LOG_DIR` | `neurolytics_data/` | Path where attendance CSVs are saved |
+
+### 7.4 Tips
+
+- Use a **well-lit, front-facing photo** per student for best recognition accuracy
+- The system marks each student **only once per session**, preventing duplicate entries
+- Run alongside the **CV Focus Monitor** to get both attendance and engagement data in the same dashboard session
+
+---
+
+## 8. Machine Learning Model
 
 The ML module uses a **Random Forest Classifier** trained on synthetic data generated from the domain thresholds.
 
@@ -253,11 +336,11 @@ python Neurolytics-ML.py --smoke-test
 
 ---
 
-## 8. Computer Vision Module
+## 9. Computer Vision Module
 
 The CV module detects engagement at the individual student level using facial landmarks and object detection.
 
-### 8.1 Detection Conditions
+### 9.1 Detection Conditions
 
 | Condition | Alert Delay | Detection Method |
 |-----------|:-----------:|-----------------|
@@ -269,13 +352,13 @@ The CV module detects engagement at the individual student level using facial la
 | **Gaze Distracted** | 8 sec | Iris gaze ratio < 0.35 (left) or > 0.65 (right), head not turned |
 | **Holding Object** | 5 sec | YOLOv8 detects phone, book, bottle, laptop, etc. in frame |
 
-### 8.2 Calibration
+### 9.2 Calibration
 
 On startup the CV module collects **90 frames** of the user looking naturally at the camera. This sets personalised baseline values for eye-open ratio and head position, improving accuracy for different face shapes and distances.
 
 ---
 
-## 9. Troubleshooting
+## 10. Troubleshooting
 
 | Problem | Solution |
 |---------|----------|
@@ -287,22 +370,27 @@ On startup the CV module collects **90 frames** of the user looking naturally at
 | YOLOv8 model not found | Run the CV script once with internet access — Ultralytics auto-downloads `yolov8n.pt` |
 | Camera not opening | Ensure no other app is using the webcam. The script uses `cv2.VideoCapture(0)` (index 0 = default camera) |
 | Port not detected automatically | Pass it explicitly: `--port COM6` (Windows) or `--port /dev/ttyUSB0` (Linux/macOS) |
+| Attendance not recognising faces | Ensure photos in `student_faces/` are front-facing and well-lit. Try lowering `TOLERANCE` to `0.45` |
+| Duplicate attendance entries | The system logs each student once per session by default — check `MIN_FRAMES` setting |
 
 ---
 
-## 10. Quick-Start Checklist
+## 11. Quick-Start Checklist
 
 | # | Module | Step |
 |---|--------|------|
 | 1 | Both | Install Python 3.9+ |
 | 2 | Both | `pip install flask flask-cors numpy scikit-learn joblib pyserial` |
 | 3 | CV | `pip install opencv-python mediapipe ultralytics pandas` |
-| 4 | ML | Connect ESP32-S3 via USB and upload `ESP32_Firmware.ino` via Arduino IDE |
-| 5 | CV | Place `face_landmarker.task` and `yolov8n.pt` next to `CV_Focus_Monitor.py` |
-| 6 | ML | Close Arduino Serial Monitor, then run `python Neurolytics-ML.py --port COM6` |
-| 7 | CV | Run `python CV_Focus_Monitor.py` |
-| 8 | Both | Open `index.html` in Chrome or Edge |
-| 9 | Both | Confirm the green "Connected" banner in the dashboard header ✅ |
+| 4 | Attendance | `pip install face-recognition opencv-python pandas openpyxl` |
+| 5 | ML | Connect ESP32-S3 via USB and upload `ESP32_Firmware.ino` via Arduino IDE |
+| 6 | CV | Place `face_landmarker.task` and `yolov8n.pt` next to `CV_Focus_Monitor.py` |
+| 7 | Attendance | Add student face images to `student_faces/` folder |
+| 8 | ML | Close Arduino Serial Monitor, then run `python Neurolytics-ML.py --port COM6` |
+| 9 | CV | Run `python CV_Focus_Monitor.py` |
+| 10 | Attendance | Run `python Attendance_Monitor.py` |
+| 11 | Both | Open `index.html` in Chrome or Edge |
+| 12 | Both | Confirm the green "Connected" banner in the dashboard header ✅ |
 
 ---
 
@@ -310,6 +398,6 @@ On startup the CV module collects **90 frames** of the user looking naturally at
 
 **Neurolytics · IAU · Saudi Vision 2030**
 
-*Built with Python · Flask · scikit-learn · MediaPipe · YOLOv8 · Arduino / ESP32-S3 · HTML5/CSS3/JS*
+*Built with Python · Flask · scikit-learn · MediaPipe · YOLOv8 · face-recognition · Arduino / ESP32-S3 · HTML5/CSS3/JS*
 
 </div>
