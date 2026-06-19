@@ -1,11 +1,12 @@
-
 import cv2
 import mediapipe as mp
 import numpy as np
 import pandas as pd
+import face_recognition
 import time
 import threading
 import csv
+import os
 from datetime import datetime
 from ultralytics import YOLO
 from flask import Flask, jsonify
@@ -17,10 +18,12 @@ sys.stdout.reconfigure(encoding="utf-8")
 # ================================================================
 #  CONFIG
 # ================================================================
-MODEL_PATH  = "face_landmarker.task"
+DATASET_DIR = r"C:\Users\zezom\Desktop\VScode\Neurolytics\student_dataset"
+
+MODEL_PATH = r"C:\Users\zezom\Desktop\VScode\Neurolytics\face_landmarker.task"
 YOLO_MODEL  = "yolov8n.pt"
 LOG_FILE    = "focus_log.csv"
-WINDOW_NAME = "AI Focus Monitor"
+WINDOW_NAME = "Neurolytics - Attendance & Focus Monitor"
 API_PORT    = 5050
 
 ALERT_EYES_CLOSED_SEC  = 7
@@ -28,7 +31,7 @@ ALERT_HEAD_DOWN_SEC    = 10
 ALERT_LOOK_AWAY_SEC    = 7
 ALERT_FACE_HIDDEN_SEC  = 4
 ALERT_OBJECT_SEC       = 5
-ALERT_EYES_COVERED_SEC = 1   
+ALERT_EYES_COVERED_SEC = 1
 ALERT_GAZE_AWAY_SEC    = 8
 
 UPDATE_HZ = 30
@@ -48,7 +51,37 @@ GAZE_LEFT_THRESH  = 0.35
 GAZE_RIGHT_THRESH = 0.65
 
 # ================================================================
-#  SHARED STATE  (written by camera thread, read by Flask thread)
+#  LOAD REGISTERED STUDENTS (face_recognition)
+# ================================================================
+def load_registered_students():
+    known_face_encodings = []
+    known_face_names = []
+
+    print("\n--- [LOG] Loading student photos from C:/student_dataset... ---")
+    if not os.path.exists(DATASET_DIR):
+        print(f"Error: Folder '{DATASET_DIR}' not found!")
+        return [], []
+
+    for folder_name in os.listdir(DATASET_DIR):
+        folder_path = os.path.join(DATASET_DIR, folder_name)
+        if os.path.isdir(folder_path):
+            print(f"Loading database photos for: {folder_name}")
+            for img_name in os.listdir(folder_path):
+                img_path = os.path.join(folder_path, img_name)
+                try:
+                    image = face_recognition.load_image_file(img_path)
+                    encodings = face_recognition.face_encodings(image)
+                    if len(encodings) > 0:
+                        known_face_encodings.append(encodings[0])
+                        known_face_names.append(folder_name)
+                except Exception:
+                    continue
+
+    print(f"--- [LOG] Success! Loaded profiles for {len(set(known_face_names))} students. ---\n")
+    return known_face_encodings, known_face_names
+
+# ================================================================
+#  SHARED STATE (written by camera thread, read by Flask thread)
 # ================================================================
 state_lock = threading.Lock()
 
@@ -56,6 +89,7 @@ shared = {
     "students": {},
     "summary":  {"total": 0, "focused": 0, "not_focused": 0, "focus_pct": 0},
     "alerts":   [],
+    "attendance": []
 }
 
 # ================================================================
@@ -97,7 +131,7 @@ cap        = cv2.VideoCapture(0)
 # ================================================================
 #  CSV LOG
 # ================================================================
-if not pd.io.common.file_exists(LOG_FILE):
+if not os.path.exists(LOG_FILE):
     with open(LOG_FILE, "w", newline="") as f:
         csv.writer(f).writerow(["timestamp", "student_id", "status", "duration_sec"])
 
@@ -168,6 +202,10 @@ def update_condition(stu_id, key, detected, limit):
     return st["active"][key]
 
 def push_alert(student_id, message):
+    # Do not trigger alerts for unidentified profiles
+    if "Unknown" in student_id:
+        return
+        
     entry = {
         "student": f"Student {student_id}",
         "message": message,
@@ -226,10 +264,21 @@ def calibrate_user(frame):
         calibrated = True
 
 # ================================================================
-#  MAIN CAMERA LOOP
+#  MAIN CAMERA LOOP (Attendance + Focus combined)
 # ================================================================
-def camera_loop():
-    session_start = time.time()
+def camera_loop(known_encodings, known_names):
+    global calibrated
+
+    session_start       = time.time()
+    already_present     = set()
+    process_this_frame  = True
+
+    fr_face_locations = []
+    fr_face_encodings = []
+    id_labels         = {}
+
+    print("--- Live Camera is Starting ---")
+    print("Press [ESC] to exit.\n")
 
     while True:
         ret, frame = cap.read()
@@ -239,19 +288,64 @@ def camera_loop():
         frame = cv2.flip(frame, 1)
         h, w  = frame.shape[:2]
 
-        # ── Calibration ──────────────────────────────────────────
+        # ── Calibration phase ────────────────────────────────────
         if not calibrated:
             calibrate_user(frame)
             bar_len = int((len(calibration_data) / CALIBRATION_FRAMES) * w)
             cv2.rectangle(frame, (0, h - 25), (bar_len, h), (0, 220, 100), -1)
             cv2.putText(frame, "Calibrating... Look at camera naturally",
-                        (30, h - 35), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 220, 100), 2)
+                        (20, h - 8), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 220, 100), 1)
             cv2.imshow(WINDOW_NAME, frame)
             if cv2.waitKey(1) & 0xFF == 27:
                 break
             continue
 
-        # ── Face detection ────────────────────────────────────────
+        # ── Face Recognition (Attendance Tracking) ───────────────
+        if process_this_frame:
+            small_frame    = cv2.resize(frame, (0, 0), fx=0.25, fy=0.25)
+            rgb_small      = cv2.cvtColor(small_frame, cv2.COLOR_BGR2RGB)
+            fr_face_locations = face_recognition.face_locations(rgb_small)
+            fr_face_encodings = face_recognition.face_encodings(rgb_small, fr_face_locations)
+            
+            id_labels.clear()
+
+            for idx, (face_enc, face_loc) in enumerate(zip(fr_face_encodings, fr_face_locations)):
+                display_text = "Unknown Student"
+                if len(known_encodings) > 0:
+                    matches       = face_recognition.compare_faces(known_encodings, face_enc, tolerance=0.5)
+                    face_distance = face_recognition.face_distance(known_encodings, face_enc)
+                    if len(face_distance) > 0:
+                        best_idx = np.argmin(face_distance)
+                        if matches[best_idx]:
+                            display_text = known_names[best_idx]
+
+                id_labels[idx] = display_text 
+
+                # Register attendance and render properties only for identified students
+                if display_text != "Unknown Student":
+                    if "_" in display_text:
+                        student_real_name, student_id_str = display_text.split("_", 1)
+                        label = f"{student_real_name} ({student_id_str})"
+                    else:
+                        student_real_name = display_text
+                        student_id_str    = "No ID"
+                        label             = student_real_name
+
+                    if display_text not in already_present:
+                        already_present.add(display_text)
+                        print(f"[ATTENDANCE MARKED] Present: {student_real_name} (ID: {student_id_str})")
+                        
+                        with state_lock:
+                            shared["attendance"].append({
+                                "name": student_real_name,
+                                "id": student_id_str,
+                                "time": datetime.now().strftime("%H:%M:%S"),
+                                "status": "Present"
+                            })
+
+        process_this_frame = not process_this_frame
+
+        # ── MediaPipe Face Detection ──────────────────────────────
         rgb    = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         result = face_landmarker.detect_for_video(
             mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb),
@@ -259,7 +353,7 @@ def camera_loop():
         )
         detected_faces = result.face_landmarks or []
 
-        # ── YOLO (handheld objects) ───────────────────────────────
+        # ── YOLO (Handheld Object Detection) ──────────────────────
         yolo_res       = yolo_model(frame, verbose=False)
         holding_object = False
         holding_name   = ""
@@ -271,15 +365,26 @@ def camera_loop():
                 if name in HANDHELD_OBJECTS:
                     holding_object = True
                     holding_name   = name
-                    cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 80, 255), 2)
-                    cv2.putText(frame, name.upper(), (x1, y1 - 8),
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 80, 255), 2)
+                    cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 80, 255), 1)
+                    cv2.putText(frame, name.upper(), (x1, y1 - 4),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 80, 255), 1)
 
-        # ── Per-face processing ───────────────────────────────────
+        # ── Per-Face Focus Analytics Processing ────────────────────
         seen_this_frame = set()
 
         for face_idx, lms in enumerate(detected_faces):
-            stu_id = str(face_idx + 1)
+            nose_x_px = int(lms[1].x * w)
+            nose_y_px = int(lms[1].y * h)
+            matched_stu_id = None
+
+            for idx, loc in enumerate(fr_face_locations):
+                top, right, bottom, left = loc
+                top *= 4; right *= 4; bottom *= 4; left *= 4
+                if (left - 20) <= nose_x_px <= (right + 20) and (top - 20) <= nose_y_px <= (bottom + 20):
+                    matched_stu_id = id_labels.get(idx)
+                    break
+
+            stu_id = matched_stu_id if matched_stu_id and matched_stu_id != "Unknown Student" else f"Unknown_{face_idx + 1}"
             seen_this_frame.add(stu_id)
 
             if stu_id not in students_state:
@@ -288,7 +393,6 @@ def camera_loop():
             st = students_state[stu_id]
             st["last_seen"] = time.time()
 
-            # Face bounding box for overlay
             xs  = [int(p.x * w) for p in lms]
             ys  = [int(p.y * h) for p in lms]
             fx1 = max(min(xs) - 10, 0)
@@ -296,6 +400,7 @@ def camera_loop():
             fx2 = min(max(xs) + 10, w)
             fy2 = min(max(ys) + 10, h)
 
+            # Draw the facial mesh vertices
             for lm in lms:
                 cv2.circle(frame, (int(lm.x * w), int(lm.y * h)), 1, (0, 220, 100), -1)
 
@@ -312,13 +417,12 @@ def camera_loop():
 
             update_condition(stu_id, "eyes_closed",  is_eyes_closed(lms, baseline_eye),    ALERT_EYES_CLOSED_SEC)
             update_condition(stu_id, "head_down",    head_down_ratio(lms) > baseline_head, ALERT_HEAD_DOWN_SEC)
-            update_condition(stu_id, "look_away",    head_turned,                           ALERT_LOOK_AWAY_SEC)
+            update_condition(stu_id, "look_away",    head_turned,                          ALERT_LOOK_AWAY_SEC)
             update_condition(stu_id, "no_face",      visible_ratio < 0.5,                  ALERT_FACE_HIDDEN_SEC)
             update_condition(stu_id, "eyes_covered", is_eyes_covered(lms),                 ALERT_EYES_COVERED_SEC)
             update_condition(stu_id, "gaze_away",    gaze_off,                             ALERT_GAZE_AWAY_SEC)
             update_condition(stu_id, "holding_obj",  holding_object,                       ALERT_OBJECT_SEC)
 
-            # Build reason list
             active_keys   = [k for k in CONDITION_KEYS if st["active"][k]]
             active_labels = []
             for k in active_keys:
@@ -339,43 +443,49 @@ def camera_loop():
             total = st["focus_time"] + st["distract_time"] + 1e-6
             st["focus_score"] = max(0.0, min(100.0, 100.0 * st["focus_time"] / total))
 
-            # Face-level HUD
-            cv2.rectangle(frame, (fx1, fy1 - 22), (fx2, fy1), (25, 25, 25), -1)
-            cv2.putText(frame,
-                        f"S{stu_id}: {status_text}  {st['focus_score']:.0f}%",
-                        (fx1 + 4, fy1 - 6),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.48, hud_color, 1)
-            cv2.rectangle(frame, (fx1, fy1), (fx2, fy2), hud_color, 1)
+            # Handle visualization rendering exclusively for recognized profiles
+            if "Unknown" not in stu_id:
+                if "_" in stu_id:
+                    real_name, id_str = stu_id.split("_", 1)
+                    display_name = f"{real_name} ({id_str})"
+                else:
+                    display_name = stu_id
 
-            for i, lbl in enumerate(active_labels[:3]):
-                cv2.putText(frame, f"! {lbl}",
-                            (fx1, fy2 + 16 + i * 16),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 80, 255), 1)
+                cv2.rectangle(frame, (fx1, fy1 - 18), (fx2, fy1), (25, 25, 25), -1)
+                cv2.putText(frame,
+                            f"{display_name}: {status_text}  {st['focus_score']:.0f}%",
+                            (fx1 + 4, fy1 - 4),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.35, hud_color, 1)
+                cv2.rectangle(frame, (fx1, fy1), (fx2, fy2), hud_color, 1)
 
-            yaw_str, pitch_str = estimate_head_angles(lms)
-            with state_lock:
-                shared["students"][stu_id] = {
-                    "status":  "FOCUSED" if is_focused else "NOT FOCUSED",
-                    "reasons": active_labels,
-                    "yaw":     yaw_str,
-                    "pitch":   pitch_str,
-                    "score":   round(st["focus_score"]),
-                }
+                for i, lbl in enumerate(active_labels[:3]):
+                    cv2.putText(frame, f"! {lbl}",
+                                (fx1, fy2 + 14 + i * 14),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.35, (0, 80, 255), 1)
 
-        # ── Handle students who left the frame ────────────────────
+                yaw_str, pitch_str = estimate_head_angles(lms)
+                with state_lock:
+                    shared["students"][stu_id] = {
+                        "status":  "FOCUSED" if is_focused else "NOT FOCUSED",
+                        "reasons": active_labels,
+                        "yaw":     yaw_str,
+                        "pitch":   pitch_str,
+                        "score":   round(st["focus_score"]),
+                    }
+
+        # ── Handle Students Who Left the Frame ────────────────────
         gone = set(students_state.keys()) - seen_this_frame
         for stu_id in gone:
             update_condition(stu_id, "no_face", True, ALERT_FACE_HIDDEN_SEC)
-            for k in ("eyes_closed","head_down","look_away","eyes_covered","gaze_away","holding_obj"):
+            for k in ("eyes_closed", "head_down", "look_away", "eyes_covered", "gaze_away", "holding_obj"):
                 update_condition(stu_id, k, False, 0)
-            # Remove after 10 s of absence
             if (students_state[stu_id]["timers"]["no_face"] and
                     time.time() - students_state[stu_id]["last_seen"] > 10):
                 del students_state[stu_id]
                 with state_lock:
                     shared["students"].pop(stu_id, None)
 
-        # ── Summary + Sensors ─────────────────────────────────────
+        # ── Summary Metrics + Global HUD Strip ────────────────────
         all_students = list(shared["students"].values())
         total_n      = len(all_students)
         focused_n    = sum(1 for s in all_students if s["status"] == "FOCUSED")
@@ -390,12 +500,10 @@ def camera_loop():
                 "focus_pct":   pct,
             }
 
-        # ── Global HUD strip ──────────────────────────────────────
-        cv2.rectangle(frame, (0, 0), (w, 36), (20, 20, 20), -1)
+        cv2.rectangle(frame, (0, 0), (w, 28), (20, 20, 20), -1)
         cv2.putText(frame,
-                    f"Students: {total_n}  |  Focused: {focused_n}"
-                    f"  |  Not Focused: {not_foc_n}  |  Rate: {pct}%",
-                    (10, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 220, 100), 2)
+                    f"Students: {total_n} | Focused: {focused_n} | Not Focused: {not_foc_n} | Rate: {pct}% | Present: {len(already_present)}",
+                    (10, 18), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 220, 100), 1)
 
         cv2.imshow(WINDOW_NAME, frame)
         if cv2.waitKey(1) & 0xFF == 27:
@@ -404,14 +512,19 @@ def camera_loop():
     cap.release()
     cv2.destroyAllWindows()
     log_event("all", "SessionEnd", time.time() - session_start)
-    print("\nSession ended.")
+    print(f"\nSession ended. Total attendance recorded: {len(already_present)} student(s).")
 
 # ================================================================
 #  ENTRY POINT
 # ================================================================
 if __name__ == "__main__":
+    known_encodings, known_names = load_registered_students()
+    if len(known_encodings) == 0:
+        print("Error: No photos found in database. Exiting.")
+        exit()
+
     print(f"Flask API → http://localhost:{API_PORT}/api/state")
     threading.Thread(target=run_flask, daemon=True).start()
 
     print("Camera starting — look naturally for calibration. Press ESC to quit.")
-    camera_loop()
+    camera_loop(known_encodings, known_names)
