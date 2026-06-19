@@ -1,401 +1,295 @@
-/* ═══════════════════════════════════════════════════════
-   script.js — Smart Hall Dashboard
-   ═══════════════════════════════════════════════════════ */
+"use strict";
 
-// ── CONFIG ──────────────────────────────────────────────
-const API_CV  = "http://localhost:5050/api/state";  // Camera / face detection
-const API_IOT = "http://localhost:5051/api/state";  // IoT sensors + ML classifier
-const POLL_MS     = 800;
-const HISTORY_MAX = 60;
+document.documentElement.setAttribute(
+    'data-theme',
+    sessionStorage.getItem('theme') || 'dark'
+);
 
-const THRESHOLDS = {
-  temperature: { min: 20,   max: 24   },
-  humidity:    { min: 57,   max: 63   },
-  light:       { min: 360,  max: 1600 },
-  noise:       { min: 2000, max: 2500 },
-};
+const API_CV = 'http://localhost:5050/api/state';
+const API_ENV = 'http://localhost:5051/api/state';
 
-// ── State ────────────────────────────────────────────────
-let cvOnline      = false;
-let iotOnline     = false;
-let focusHistory  = [];
-let knownAlertIds = new Set();
+let focusHist = Array(60).fill(null);
+let chart;
+let envConnected = false;
+let cvConnected = false;
 
-// ════════════════════════════════════════════════════════
-//  Clock
-// ════════════════════════════════════════════════════════
-function updateClock() {
-  document.getElementById("clock").textContent =
-    new Date().toLocaleTimeString("en-US", { hour12: true });
+// ── Clock ────────────────────────────────────────────────────────────────
+function tick() {
+    document.getElementById('clk').textContent =
+        new Date().toLocaleTimeString('en-US',
+            { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: true });
 }
-setInterval(updateClock, 1000);
-updateClock();
+setInterval(tick, 1000); tick();
 
-// ════════════════════════════════════════════════════════
-//  Connection Banner
-// ════════════════════════════════════════════════════════
-function updateConnBanner() {
-  const el = document.getElementById("conn-banner");
-  if (cvOnline && iotOnline) {
-    el.className  = "ok";
-    el.textContent = "✅ Both APIs connected — Camera (5050) + IoT (5051) live";
-  } else if (cvOnline && !iotOnline) {
-    el.className  = "partial";
-    el.textContent = "⚠️ Camera API online (5050) — IoT API offline (5051). Run: python Neurolytics-ML.py --port COM6";
-  } else if (!cvOnline && iotOnline) {
-    el.className  = "partial";
-    el.textContent = "⚠️ IoT API online (5051) — Camera API offline (5050). Run: python cv_script.py";
-  } else {
-    el.className  = "err";
-    el.textContent = "❌ Both APIs offline — start Neurolytics-ML.py (port 5051) and the CV script (port 5050)";
-  }
+function updateChartTheme() {
+    const light = document.documentElement.getAttribute('data-theme') === 'light';
+    chart.options.scales.y.grid.color = light ? 'rgba(0,0,0,0.06)' : 'rgba(255,255,255,0.04)';
+    chart.options.scales.y.ticks.color = light ? '#94a3b8' : '#475569';
+    chart.options.plugins.tooltip.backgroundColor = light ? '#ffffff' : '#13161e';
+    chart.options.plugins.tooltip.borderColor = light ? '#e2e5ef' : '#1e2333';
+    chart.options.plugins.tooltip.titleColor = light ? '#475569' : '#94a3b8';
+    chart.options.plugins.tooltip.bodyColor = light ? '#1e293b' : '#e2e8f0';
+    chart.update('none');
 }
 
-// ════════════════════════════════════════════════════════
-//  Environment Focus Banner
-// ════════════════════════════════════════════════════════
-function renderEnvBanner(ef) {
-  if (!ef) return;
+// ── Chart ────────────────────────────────────────────────────────────────
+function initChart() {
+    const ctx = document.getElementById('focus-chart').getContext('2d');
+    chart = new Chart(ctx, {
+        type: 'line',
+        data: {
+            labels: Array(60).fill(''), datasets: [{
+                data: focusHist,
+                borderColor: '#00e5a0',
+                backgroundColor: 'rgba(0,229,160,0.05)',
+                borderWidth: 2, fill: true, tension: 0.4, pointRadius: 0, spanGaps: true
+            }]
+        },
+        options: {
+            responsive: true, maintainAspectRatio: false,
+            animation: { duration: 300 },
+            plugins: {
+                legend: { display: false }, tooltip: {
+                    backgroundColor: '#13161e', borderColor: '#1e2333', borderWidth: 1,
+                    titleColor: '#94a3b8', bodyColor: '#e2e8f0',
+                    titleFont: { size: 11 }, bodyFont: { family: 'JetBrains Mono', size: 13 },
+                    callbacks: { label: c => ` ${Math.round(c.raw)}%` }
+                }
+            },
+            scales: {
+                x: { display: false },
+                y: {
+                    min: 0, max: 100,
+                    grid: { color: 'rgba(255,255,255,0.04)' }, border: { display: false },
+                    ticks: { color: '#475569', font: { size: 11, family: 'JetBrains Mono' }, callback: v => v + '%' }
+                }
+            }
+        }
+    });
+}
+initChart();
 
-  const label = ef.label || "—";
-  const conf  = ef.conf  || {};
-  const pct   = conf[label] != null ? `${(conf[label] * 100).toFixed(0)}% confidence` : "";
-
-  const icons = { "Focused": "✅", "Half Focus": "⚠️", "Not Focused": "🚫" };
-  const cls   = { "Focused": "focused", "Half Focus": "half", "Not Focused": "notfocused" };
-  const msgs  = {
-    "Focused":     "✅ Environment is optimal for learning.",
-    "Half Focus":  "⚠️  Environment is suboptimal — check sensors.",
-    "Not Focused": "🚫 Environment is poor — readings out of range.",
-  };
-
-  document.getElementById("env-banner").className    = cls[label]  || "focused";
-  document.getElementById("env-icon").textContent    = icons[label] || "🔍";
-  document.getElementById("env-label").textContent   = msgs[label]  || label;
-  document.getElementById("env-conf").textContent    = pct;
+// ── Nav ──────────────────────────────────────────────────────────────────
+function switchView(name, btn) {
+    document.querySelectorAll('.view').forEach(v => v.classList.remove('active'));
+    document.getElementById('view-' + name).classList.add('active');
+    document.querySelectorAll('.nav-item').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
 }
 
-// ════════════════════════════════════════════════════════
-//  Summary Bar
-// ════════════════════════════════════════════════════════
-function renderSummary(sum) {
-  if (!sum) return;
-  document.getElementById("stat-total").textContent    = sum.total       ?? 0;
-  document.getElementById("stat-focused").textContent  = sum.focused     ?? 0;
-  document.getElementById("stat-unfocused").textContent= sum.not_focused ?? 0;
-  document.getElementById("stat-pct").textContent      =
-    sum.total ? (sum.focus_pct ?? 0) + "%" : "—";
+// ── Student card ─────────────────────────────────────────────────────────
+function stuCard(id, s) {
+    const fc = s.status === 'FOCUSED';
+    const sc = Math.round(s.score || 0);
+    const clr = fc ? '#00e5a0' : '#f43f5e';
+    const ini = (s.name || '??').replace(/[^a-zA-Z ]/g, '').split(' ')
+        .filter(Boolean).map(w => w[0]).join('').toUpperCase().slice(0, 2) || '??';
+    const reasons = (s.reasons || []).map(r => `<span class="rtag">${r}</span>`).join('');
+    return `<div class="stu-card">
+    <div class="stu-top">
+      <div class="stu-avatar">${ini}</div>
+      <span class="stu-status-pill ${fc ? 'sp-focused' : 'sp-unfocused'}">${s.status}</span>
+    </div>
+    <div class="stu-name" title="${s.name || id}">${s.name || id}</div>
+    <div class="stu-meta">YAW ${s.yaw || '—'} · PITCH ${s.pitch || '—'}</div>
+    <div class="score-row"><span>Focus Score</span>
+      <span class="score-num" style="color:${clr}">${sc}%</span></div>
+    <div class="score-track">
+      <div class="score-fill" style="width:${sc}%;background:${clr}"></div></div>
+    ${reasons ? `<div class="reason-tags">${reasons}</div>` : ''}
+  </div>`;
 }
 
-// ════════════════════════════════════════════════════════
-//  Student Cards
-// ════════════════════════════════════════════════════════
-const REASON_ICONS = {
-  "Sleeping":       "😴",
-  "Head Down":      "⬇️",
-  "Looking Away":   "👀",
-  "Face Hidden":    "🚫",
-  "Eyes Covered":   "🙈",
-  "Gaze Distracted":"📱",
-};
-
-function reasonIcon(t) {
-  if (!t) return "⚠️";
-  if (t.toLowerCase().includes("phone") || t.toLowerCase().includes("holding")) return "📵";
-  return REASON_ICONS[t] || "⚠️";
-}
-
-function buildCardHTML(id, s) {
-  const isFoc   = s.status === "FOCUSED";
-  const cls     = isFoc ? "focused" : "not-focused";
-  const score   = s.score ?? 100;
-  const reasons = s.reasons || [];
-
-  const causeHTML = isFoc
-    ? `<div class="cause-block is-focused">
-         <span class="cause-icon">✅</span>
-         <span class="cause-text">Paying attention</span>
-       </div>`
-    : `<div class="cause-block not-focused-block">
-         <div class="cause-header">⚠️ Reason${reasons.length !== 1 ? "s" : ""}</div>
-         <div class="cause-reasons">
-           ${reasons.length
-             ? reasons.map(r => `
-               <div class="cause-row">
-                 <span class="cause-row-icon">${reasonIcon(r)}</span>
-                 <span class="cause-row-text">${r}</span>
-               </div>`).join("")
-             : `<div class="cause-row">
-                  <span class="cause-row-icon">⏳</span>
-                  <span class="cause-row-text">Detecting…</span>
-                </div>`}
-         </div>
-       </div>`;
-
-  return `
-    <div class="card-stripe"></div>
-    <div class="card-body">
-      <div class="card-header">
-        <div style="display:flex;align-items:center;gap:9px;">
-          <div class="student-avatar">S${id}</div>
-          <div>
-            <div class="student-name">Student ${id}</div>
-            <div class="pose-info">yaw: ${s.yaw || '—'} &nbsp;|&nbsp; pitch: ${s.pitch || '—'}</div>
-          </div>
-        </div>
-        <div class="status-badge ${cls}">${isFoc ? "FOCUSED" : "NOT FOCUSED"}</div>
-      </div>
-      ${causeHTML}
-      <div class="score-row">
-        <span class="score-label">Focus</span>
-        <div class="score-track">
-          <div class="score-fill${score < 50 ? ' low' : ''}" style="width:${score}%"></div>
-        </div>
-        <span class="score-num">${score}%</span>
-      </div>
-    </div>`;
-}
-
-function renderStudents(students) {
-  const grid = document.getElementById("student-grid");
-  const ids  = students ? Object.keys(students) : [];
-
-  if (!ids.length) {
-    if (!grid.querySelector(".camera-offline")) {
-      grid.innerHTML = `
-        <div class="camera-offline">
-          <div class="cam-icon">📷</div>
-          <div class="cam-title">Camera Feed Offline</div>
-          <div class="cam-sub">
-            Student monitoring requires the CV script running on port 5050.<br>
-            Connect a camera and start <strong>cv_script.py</strong> to see live student cards here.
-          </div>
-        </div>`;
-    }
-    return;
-  }
-
-  // Remove offline placeholder if present
-  grid.querySelector(".camera-offline")?.remove();
-
-  // Remove stale cards
-  grid.querySelectorAll(".student-card").forEach(card => {
-    if (!ids.includes(card.dataset.id)) card.remove();
-  });
-
-  ids.forEach(id => {
-    const s   = students[id];
-    const cls = s.status === "FOCUSED" ? "focused" : "not-focused";
-    const existing = grid.querySelector(`[data-id="${id}"]`);
-
-    if (existing) {
-      existing.className = `student-card ${cls}`;
-      existing.innerHTML = buildCardHTML(id, s);
+function setEnvCell(valId, statusId, raw, unit, lo, hi) {
+    if (raw == null) return;
+    document.getElementById(valId).innerHTML =
+        raw + `<span class="env-unit-light"> ${unit}</span>`;
+    const st = document.getElementById(statusId);
+    if (raw < lo || raw > hi) {
+        st.textContent = '⚠ Out of range';
+        st.className = 'env-status es-err';
     } else {
-      const card = document.createElement("div");
-      card.className  = `student-card ${cls}`;
-      card.dataset.id = id;
-      card.innerHTML  = buildCardHTML(id, s);
-      grid.appendChild(card);
+        st.textContent = '✓ Normal';
+        st.className = 'env-status es-ok';
     }
-  });
 }
 
-// ════════════════════════════════════════════════════════
-//  Sensor Cards
-// ════════════════════════════════════════════════════════
-function setWarn(id, isWarn) {
-  document.getElementById(id)?.classList.toggle("warn", isWarn);
+function renderEnv(d) {
+    const s = d.sensors || {};
+
+    // Show/hide no-data notice
+    const hasData = Object.keys(s).length > 0;
+    document.getElementById('env-no-data').style.display = hasData ? 'none' : '';
+    document.getElementById('env-focus-banner').style.display = hasData ? '' : 'none';
+
+    if (!hasData) return;
+
+    // Sensor cells — key names from ML snapshot(): temperature, humidity, light, noise, motion
+    setEnvCell('e-temp', 'e-temp-s', s.temperature != null ? +s.temperature.toFixed(1) : null, '°C', 20, 24);
+    setEnvCell('e-hum', 'e-hum-s', s.humidity != null ? +s.humidity.toFixed(1) : null, '%', 57, 63);
+    setEnvCell('e-light', 'e-light-s', s.light != null ? Math.round(s.light) : null, 'lx', 360, 1600);
+    setEnvCell('e-noise', 'e-noise-s', s.noise != null ? Math.round(s.noise) : null, 'ADC', 2000, 2500);
+
+    // PIR — ML sends "motion" (0 or 1)
+    if (s.motion != null) {
+        const pirEl = document.getElementById('e-pir');
+        const pirSt = document.getElementById('e-pir-s');
+        pirEl.textContent = s.motion ? 'DETECTED' : 'ABSENT';
+        pirSt.textContent = s.motion ? 'Motion present' : 'No motion';
+        pirSt.className = 'env-status ' + (s.motion ? 'es-ok' : 'es-warn');
+    }
+
+    // ML classifier label banner
+    const ef = d.env_focus || {};
+    const lbl = ef.label || '—';
+    const valEl = document.getElementById('efb-val');
+    valEl.textContent = lbl;
+    valEl.className = 'efb-val ' +
+        (lbl === 'Focused' ? 'focused' :
+            lbl === 'Half Focus' ? 'half' :
+                lbl === 'Not Focused' ? 'not-focused' : '');
+
+    // Confidence breakdown
+    const conf = ef.conf || {};
+    const confStr = Object.entries(conf)
+        .map(([k, v]) => `${k}: ${(v * 100).toFixed(0)}%`)
+        .join('  ·  ');
+    document.getElementById('efb-conf').textContent = confStr;
 }
 
-function renderSensors(s) {
-  if (!s) return;
+// ── CV data renderer (students / attendance / alerts) ────────────────────
+function render(d) {
+    const sum = d.summary || {};
+    const total = sum.total || 0;
+    document.getElementById('s-total').innerHTML = total;
+    document.getElementById('s-focused').innerHTML = sum.focused || 0;
+    document.getElementById('s-unfocused').innerHTML = sum.not_focused || 0;
+    const rate = total ? (sum.focus_pct || 0) : null;
+    document.getElementById('s-rate').innerHTML = rate !== null
+        ? `${rate}<span class="metric-unit">%</span>`
+        : `—<span class="metric-unit">%</span>`;
+    document.getElementById('s-foot').textContent = total
+        ? `${total} student${total !== 1 ? 's' : ''} in frame`
+        : 'No students in frame';
 
-  const temp = +s.temperature || 0;
-  document.getElementById("s-temp").textContent      = temp.toFixed(1);
-  document.getElementById("bar-temp").style.width    = Math.min(temp / 50 * 100, 100) + "%";
-  setWarn("card-temp", temp < THRESHOLDS.temperature.min || temp > THRESHOLDS.temperature.max);
+    focusHist.push(total ? (sum.focus_pct || 0) : null);
+    focusHist = focusHist.slice(-60);
+    chart.data.datasets[0].data = focusHist;
+    chart.update('none');
 
-  const hum = +s.humidity || 0;
-  document.getElementById("s-hum").textContent       = hum.toFixed(1);
-  document.getElementById("bar-hum").style.width     = Math.min(hum, 100) + "%";
-  setWarn("card-hum", hum < THRESHOLDS.humidity.min || hum > THRESHOLDS.humidity.max);
+    // Students
+    const students = d.students || {};
+    const keys = Object.keys(students);
+    const lbl = `${keys.length} detected`;
+    document.getElementById('stu-count').textContent = lbl;
+    document.getElementById('stu-count2').textContent = lbl;
+    const html = keys.length
+        ? keys.map(id => stuCard(id, students[id])).join('')
+        : '<div class="stu-empty-light">Waiting for students…</div>';
+    document.getElementById('stu-grid').innerHTML = html;
+    document.getElementById('stu-grid2').innerHTML = html;
 
-  const light = +s.light || 0;
-  document.getElementById("s-light").textContent     = light;
-  document.getElementById("bar-light").style.width   = Math.min(light / 2000 * 100, 100) + "%";
-  setWarn("card-light", light < THRESHOLDS.light.min || light > THRESHOLDS.light.max);
+    // Alerts
+    const alerts = d.alerts || [];
+    const cnt = alerts.length;
 
-  const noise = +s.noise || 0;
-  document.getElementById("s-noise").textContent     = noise;
-  document.getElementById("bar-noise").style.width   = Math.min(noise / 4095 * 100, 100) + "%";
-  setWarn("card-noise", noise < THRESHOLDS.noise.min || noise > THRESHOLDS.noise.max);
+    document.getElementById('sidebar-alert-list').innerHTML = cnt
+        ? alerts.map(a => `<div class="sidebar-al-item">
+        <div class="sidebar-al-who">${a.student}</div>
+        <div class="sidebar-al-msg">${a.message}</div>
+        <div class="sidebar-al-t">${a.time}</div>
+      </div>`).join('')
+        : '<div class="sidebar-al-empty">No alerts yet</div>';
 
-  const motion = !!s.motion;
-  document.getElementById("s-motion-text").textContent = motion ? "Motion Detected" : "No Motion";
-  document.getElementById("motion-dot").className      = "motion-dot" + (motion ? " active" : "");
-  setWarn("card-motion", !motion);
+    const ab = document.getElementById('alert-badge');
+    const nb = document.getElementById('alert-nav-badge');
+    if (cnt > 0) {
+        ab.textContent = cnt; ab.style.display = '';
+        nb.textContent = cnt; nb.style.display = '';
+    } else {
+        ab.style.display = 'none';
+        nb.style.display = 'none';
+    }
+
+    document.getElementById('alert-history-list').innerHTML = cnt
+        ? alerts.map(a => `<div class="al-item">
+        <div class="al-who">${a.student}</div>
+        <div class="al-msg">${a.message}</div>
+        <div class="al-t">${a.time}</div>
+      </div>`).join('')
+        : '<div class="al-empty">No alerts yet</div>';
+    document.getElementById('alert-history-lbl').textContent =
+        `${cnt} alert${cnt !== 1 ? 's' : ''}`;
+
+    // Attendance
+    const att = d.attendance || [];
+    document.getElementById('att-badge').textContent = att.length;
+    document.getElementById('att-lbl').textContent =
+        `${att.length} student${att.length !== 1 ? 's' : ''} present`;
+    document.getElementById('att-body').innerHTML = att.length
+        ? att.map((a, i) => `<tr>
+        <td class="row-num">${String(i + 1).padStart(2, '0')}</td>
+        <td><span class="att-av-sm">${(a.name || '?').slice(0, 2).toUpperCase()}</span>${a.name}</td>
+        <td class="att-id-cell">${a.id}</td>
+        <td class="att-time-cell">${a.time}</td>
+        <td><span class="present-badge">✓ Present</span></td>
+      </tr>`).join('')
+        : '<tr><td colspan="5" class="att-empty-light">No students recognised yet</td></tr>';
 }
 
-// ════════════════════════════════════════════════════════
-//  Alert Log  (merged from both APIs, deduplicated)
-// ════════════════════════════════════════════════════════
-function renderAlerts(alerts) {
-  if (!alerts?.length) return;
-
-  const list = document.getElementById("alerts-list");
-  list.querySelector(".no-alerts")?.remove();
-
-  alerts.forEach(a => {
-    const uid = `${a.time}|${a.student}|${a.message}`;
-    if (knownAlertIds.has(uid)) return;
-    knownAlertIds.add(uid);
-
-    const item = document.createElement("div");
-    item.className = `alert-item ${a.type === "iot" ? "iot" : ""}`;
-    item.innerHTML = `
-      <div class="alert-top">
-        <span class="alert-student">${a.student || "IoT Sensor"}</span>
-        <span class="alert-time">${a.time}</span>
-      </div>
-      <div class="alert-reason">${a.message}</div>`;
-    list.insertBefore(item, list.firstChild);
-  });
-
-  // Keep max 60 entries
-  while (list.children.length > 60) list.removeChild(list.lastChild);
-}
-
-// ════════════════════════════════════════════════════════
-//  Focus History Sparkline  (canvas)
-// ════════════════════════════════════════════════════════
-function renderHistory(labelInt) {
-  focusHistory.push(labelInt ?? 2);
-  if (focusHistory.length > HISTORY_MAX) focusHistory.shift();
-
-  const canvas = document.getElementById("history-canvas");
-  const dpr    = window.devicePixelRatio || 1;
-  const W      = canvas.offsetWidth  || 600;
-  const H      = canvas.offsetHeight || 150;
-
-  canvas.width  = W * dpr;
-  canvas.height = H * dpr;
-
-  const ctx = canvas.getContext("2d");
-  ctx.scale(dpr, dpr);
-  ctx.clearRect(0, 0, W, H);
-
-  const n      = focusHistory.length;
-  const stepX  = W / Math.max(n - 1, 1);
-  const padY   = 22;
-  const usableH = H - padY * 2;
-
-  const colors = ["#ff4757", "#ffa502", "#00d68f"];
-  const labels = ["Not Focused", "Half Focus", "Focused"];
-
-  // Grid lines + labels
-  [0, 1, 2].forEach(lv => {
-    const y = padY + usableH - (lv / 2) * usableH;
-    ctx.strokeStyle = "rgba(22,51,80,.8)";
-    ctx.lineWidth   = 1;
-    ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(W, y); ctx.stroke();
-    ctx.fillStyle = colors[lv];
-    ctx.font      = "10px 'Space Mono',monospace";
-    ctx.textAlign = "left";
-    ctx.fillText(labels[lv], 4, y - 3);
-  });
-
-  if (n < 2) return;
-
-  const lx = (n - 1) * stepX;
-  const ly = padY + usableH - (focusHistory[n - 1] / 2) * usableH;
-
-  // Gradient fill under line
-  const grad = ctx.createLinearGradient(0, padY, 0, H);
-  grad.addColorStop(0, "rgba(0,214,143,.2)");
-  grad.addColorStop(1, "rgba(0,214,143,.01)");
-
-  ctx.beginPath();
-  focusHistory.forEach((v, i) => {
-    const x = i * stepX, y = padY + usableH - (v / 2) * usableH;
-    i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
-  });
-  ctx.lineTo(lx, H); ctx.lineTo(0, H); ctx.closePath();
-  ctx.fillStyle = grad;
-  ctx.fill();
-
-  // Line
-  ctx.beginPath();
-  focusHistory.forEach((v, i) => {
-    const x = i * stepX, y = padY + usableH - (v / 2) * usableH;
-    i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
-  });
-  ctx.strokeStyle = "#00d68f";
-  ctx.lineWidth   = 2.5;
-  ctx.lineJoin    = "round";
-  ctx.stroke();
-
-  // Latest dot
-  ctx.beginPath();
-  ctx.arc(lx, ly, 5, 0, Math.PI * 2);
-  ctx.fillStyle   = "#00d68f";
-  ctx.shadowColor = "#00d68f";
-  ctx.shadowBlur  = 8;
-  ctx.fill();
-  ctx.shadowBlur  = 0;
-}
-
-// ════════════════════════════════════════════════════════
-//  Fetch Helper  (returns null on failure)
-// ════════════════════════════════════════════════════════
-async function safeFetch(url) {
-  try {
-    const res = await fetch(url, { cache: "no-store" });
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    return await res.json();
-  } catch (_) {
-    return null;
-  }
-}
-
-// ════════════════════════════════════════════════════════
-//  Main Poll  — hits both APIs concurrently then merges
-// ════════════════════════════════════════════════════════
+// ── Poll CV (port 5050) ──────────────────────────────────────────────────
 async function poll() {
-  const [cvData, iotData] = await Promise.all([
-    safeFetch(API_CV),
-    safeFetch(API_IOT),
-  ]);
-
-  cvOnline  = cvData  !== null;
-  iotOnline = iotData !== null;
-  updateConnBanner();
-
-  // Students → CV script (port 5050)
-  renderStudents(cvData?.students ?? {});
-
-  // Sensors + env_focus → IoT/ML script (port 5051)
-  renderSensors(iotData?.sensors ?? null);
-  renderEnvBanner(iotData?.env_focus ?? null);
-
-  // Summary: prefer CV (real headcount), fall back to IoT
-  renderSummary(cvData?.summary ?? iotData?.summary ?? null);
-
-  // Alerts: merge both lists, interleaved
-  const cvAlerts  = cvData?.alerts  ?? [];
-  const iotAlerts = (iotData?.alerts ?? []).map(a => ({ ...a, type: "iot" }));
-  const merged    = [];
-  const maxLen    = Math.max(cvAlerts.length, iotAlerts.length);
-  for (let i = 0; i < maxLen; i++) {
-    if (i < cvAlerts.length)  merged.push(cvAlerts[i]);
-    if (i < iotAlerts.length) merged.push(iotAlerts[i]);
-  }
-  renderAlerts(merged);
-
-  // History sparkline: prefer IoT classifier label
-  renderHistory(iotData?.env_focus?.int ?? 2);
+    const dot = document.getElementById('conn-dot');
+    const txt = document.getElementById('conn-txt');
+    try {
+        const r = await fetch(API_CV, { cache: 'no-store' });
+        const d = await r.json();
+        if (!cvConnected) {
+            cvConnected = true;
+            dot.className = 'conn-dot blink';
+            dot.removeAttribute('style');
+            txt.textContent = 'Online';
+        }
+        render(d);
+    } catch {
+        cvConnected = false;
+        dot.className = 'conn-dot err';
+        txt.textContent = 'Offline';
+    }
 }
 
-// ── Start ────────────────────────────────────────────────
-poll();
-setInterval(poll, POLL_MS);
+// ── Poll ENV (port 5051) ─────────────────────────────────────────────────
+async function pollEnv() {
+    const dot = document.getElementById('env-conn-dot');
+    const txt = document.getElementById('env-conn-txt');
+    try {
+        const r = await fetch(API_ENV, { cache: 'no-store' });
+        const d = await r.json();
+        if (!envConnected) {
+            envConnected = true;
+            dot.className = 'env-conn-dot online';
+            txt.textContent = 'Online';
+        }
+        renderEnv(d);
+    } catch {
+        envConnected = false;
+        dot.className = 'env-conn-dot err';
+        txt.textContent = 'Offline';
+        // clear env display to show "no data" state
+        document.getElementById('env-no-data').style.display = '';
+        document.getElementById('env-focus-banner').style.display = 'none';
+    }
+}
+
+// Update toggleTheme to save preference
+function toggleTheme() {
+    const html = document.documentElement;
+    const next = html.getAttribute('data-theme') === 'dark' ? 'light' : 'dark';
+    html.setAttribute('data-theme', next);
+    sessionStorage.setItem('theme', next);
+    if (chart) updateChartTheme();
+}
+
+// ── Start both pollers ───────────────────────────────────────────────────
+poll(); setInterval(poll, 1000);
+pollEnv(); setInterval(pollEnv, 1000);
