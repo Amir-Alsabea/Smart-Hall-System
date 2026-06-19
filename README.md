@@ -1,9 +1,9 @@
 <div align="center">
 
-# 🧠 Neurolytics
+# 🧠 Smart Hall System
 ### The Next-Gen Smart Classroom: Quality Education Powered by AI
 
-**Neurolytics** is an AI-powered classroom monitoring system that tracks student attention in real-time by combining IoT sensors (temperature, humidity, light, motion, sound) with Computer Vision. It classifies the learning environment, detects student distractions, automates attendance, and delivers live analytics to educators through a web-based Command Center dashboard.
+**Smart Hall System** is an AI-powered classroom monitoring system that tracks student attention in real-time by combining IoT sensors (temperature, humidity, light, motion, sound) with Computer Vision. It classifies the learning environment, detects student distractions, automates attendance, and delivers live analytics to educators through a web-based Command Center dashboard.
 
 ---
 
