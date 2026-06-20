@@ -41,12 +41,11 @@
 3. [Software Prerequisites](#3-software-prerequisites)
 4. [Project File Structure](#4-project-file-structure)
 5. [Step-by-Step: Installation & Running](#5-step-by-step-installation--running)
-6. [Dashboard Guide](#6-dashboard-guide)
-7. [Attendance Monitor](#7-attendance-monitor)
-8. [Machine Learning Model](#8-machine-learning-model)
-9. [Computer Vision Module](#9-computer-vision-module)
-10. [Troubleshooting](#10-troubleshooting)
-11. [Quick-Start Checklist](#11-quick-start-checklist)
+6. [Attendance Monitor](#6-attendance-monitor)
+7. [Machine Learning Model](#7-machine-learning-model)
+8. [Computer Vision Module](#8-computer-vision-module)
+9. [Troubleshooting](#9-troubleshooting)
+10. [Quick-Start Checklist](#10-quick-start-checklist)
 
 ---
 
@@ -249,35 +248,11 @@ python Neurolytics-ML.py --no-arduino
 
 ---
 
-## 6. Dashboard Guide
-
-| Panel | What It Shows |
-|-------|--------------|
-| **Environment Banner** | Top colored bar: 🟢 Focused · 🟡 Half Focus · 🔴 Not Focused. Shows ML confidence %. |
-| **Summary Bar** | Four stat cards: total students, focused count, not focused count, and live focus rate (%) |
-| **Focus Rate Chart** | Sparkline of the last 60-second focus rate trend |
-| **IoT Sensor Cards** | Live values for Temperature, Humidity, Light, Noise, and Motion. Red warning badge when out of range. |
-| **Student Monitor** | Per-student attention diagnostics with distraction type labels |
-| **Attendance Register** | Live list of present students with timestamps, linked to the Attendance Monitor module |
-| **Alert Log** | Scrollable list of the last 60 alerts — yellow for IoT threshold breaches, red for classification alerts |
-
-### Environment Thresholds
-
-| Sensor | Min (Optimal) | Max (Optimal) | Unit |
-|--------|:-------------:|:-------------:|------|
-| Temperature | 20 | 24 | °C |
-| Humidity | 57 | 63 | % relative humidity |
-| Light Level | 360 | 1600 | lux (ADC 0–4095) |
-| Noise Level | 2000 | 2500 | ADC value (0–4095) |
-| Motion (PIR) | 1 (present) | — | Binary: 1 = detected, 0 = absent |
-
----
-
-## 7. Attendance Monitor
+## 6. Attendance Monitor
 
 The Attendance Monitor uses **face recognition** to automatically identify and log students as they enter the classroom — no manual roll call needed.
 
-### 7.1 How It Works
+### 6.1 How It Works
 
 | Step | Description |
 |------|-------------|
@@ -286,7 +261,7 @@ The Attendance Monitor uses **face recognition** to automatically identify and l
 | **3. Logging** | First confirmed match per session is recorded as present with a timestamp |
 | **4. Export** | Session ends with a CSV report in `neurolytics_data/` and a summary shown in the dashboard |
 
-### 7.2 Attendance Log Format
+### 6.2 Attendance Log Format
 
 ```csv
 student_id, name, timestamp, status
@@ -295,7 +270,7 @@ student_id, name, timestamp, status
 2021003, Mohammed Saleh,  —,                   Absent
 ```
 
-### 7.3 Configuration
+### 6.3 Configuration
 
 | Parameter | Default | Description |
 |-----------|:-------:|-------------|
@@ -305,7 +280,7 @@ student_id, name, timestamp, status
 | `FACES_DIR` | `student_faces/` | Path to enrolled student face images |
 | `LOG_DIR` | `neurolytics_data/` | Path where attendance CSVs are saved |
 
-### 7.4 Tips
+### 6.4 Tips
 
 - Use a **well-lit, front-facing photo** per student for best recognition accuracy
 - The system marks each student **only once per session**, preventing duplicate entries
@@ -313,7 +288,7 @@ student_id, name, timestamp, status
 
 ---
 
-## 8. Machine Learning Model
+## 7. Machine Learning Model
 
 The ML module uses a **Random Forest Classifier** trained on synthetic data generated from the domain thresholds.
 
@@ -338,11 +313,11 @@ python Neurolytics-ML.py --smoke-test
 
 ---
 
-## 9. Computer Vision Module
+## 8. Computer Vision Module
 
 The CV module detects engagement at the individual student level using facial landmarks and object detection.
 
-### 9.1 Detection Conditions
+### 8.1 Detection Conditions
 
 | Condition | Alert Delay | Detection Method |
 |-----------|:-----------:|-----------------|
@@ -354,13 +329,13 @@ The CV module detects engagement at the individual student level using facial la
 | **Gaze Distracted** | 8 sec | Iris gaze ratio < 0.35 (left) or > 0.65 (right), head not turned |
 | **Holding Object** | 5 sec | YOLOv8 detects phone, book, bottle, laptop, etc. in frame |
 
-### 9.2 Calibration
+### 8.2 Calibration
 
 On startup the CV module collects **90 frames** of the user looking naturally at the camera. This sets personalised baseline values for eye-open ratio and head position, improving accuracy for different face shapes and distances.
 
 ---
 
-## 10. Troubleshooting
+## 9. Troubleshooting
 
 | Problem | Solution |
 |---------|----------|
@@ -377,7 +352,7 @@ On startup the CV module collects **90 frames** of the user looking naturally at
 
 ---
 
-## 11. Quick-Start Checklist
+## 10. Quick-Start Checklist
 
 | # | Module | Step |
 |---|--------|------|
