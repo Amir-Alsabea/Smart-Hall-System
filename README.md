@@ -25,7 +25,7 @@
 <div align="center">
 
 <p align="center">
-  <img src="Dashboard/proto.jpeg" alt="Dashboard Preview" width="900" height="400">
+  <img src="Dashboard/proto.jpeg" alt="Dashboard Preview" width="900" height="450">
 </p>
 
 *Left: Hardware prototype with ESP32-S3, sensors, and live Command Center dashboard · Top right: Project poster · Bottom right: AI-powered camera on tripod in the classroom*
