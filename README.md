@@ -24,7 +24,7 @@
 
 <div align="center">
 
-![Neurolytics Project Showcase](./assets/neurolytics_showcase.jpeg)
+![Project Screenshot](Dashboard/proto.jpeg)
 
 *Left: Hardware prototype with ESP32-S3, sensors, and live Command Center dashboard · Top right: Project poster · Bottom right: AI-powered camera on tripod in the classroom*
 
